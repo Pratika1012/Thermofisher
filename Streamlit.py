@@ -1,4 +1,6 @@
 import streamlit as st
+from PIL import Image
+
 from docx import Document
 import pandas as pd
 import pdfplumber
@@ -10,18 +12,20 @@ import zipfile
 import re
 import google.generativeai as genai
 import fitz 
-import time
 
-
+from docx.shared import Inches
 
 
 # Title of the app
 
 st.title("   Welcome to Document Generator   ")
 
+
+
+
 genai.configure(api_key="AIzaSyBNKJ5UoqldD8BwNVCwbDHs3GquaZ9OIjM")
 generation_config = {
-    "temperature": 0.3,
+    "temperature": 0.4,
     "top_p": 0.9,
     "top_k": 50,
     "max_output_tokens": 2048,
@@ -33,7 +37,6 @@ safety_settings = [
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
 ]
-
 # Initialize the Gemini model
 model = genai.GenerativeModel(
     model_name="gemini-pro",
@@ -41,8 +44,10 @@ model = genai.GenerativeModel(
     safety_settings=safety_settings
 )
 
-def estimate_token_count(text):
-    return len(text) // 4  # Approximate 4 characters per token
+
+
+
+
 
 
 def extract_and_format_tables(file_path):
@@ -130,7 +135,6 @@ def save_tables_to_excel(tables):
     output.seek(0)
     return output.getvalue()
 
-
 def generate_excel_download_link(excel_data,name):
     # Encode the Excel file data to base64
     b64 = base64.b64encode(excel_data).decode()
@@ -139,6 +143,9 @@ def generate_excel_download_link(excel_data,name):
     href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{name}.xlsx">Click here to download your Excel file</a>'
     return href
 
+
+
+
 def clean_text(text):
     """
     Remove control characters and invalid XML characters from the text.
@@ -146,55 +153,81 @@ def clean_text(text):
     cleaned_text = re.sub(r'[^\x20-\x7E\n\r\t]', '', text)
     return cleaned_text
 
-def extract_pdf_text(pdf_file):
+def extract_pdf_text(pdf_file,page_number=[]):
     """
     Extract text from the PDF while attempting to include all content, including tables.
     """
     # Read the content of the uploaded file into bytes
-    pdf_bytes = pdf_file.read()
+    with open(pdf_file, "rb") as pdf_file:
+        pdf_bytes = pdf_file.read()
     
     # Open the PDF from bytes
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     extracted_text = []
+    if len(page_number)==0:
+        for page_num in range(doc.page_count):
+            page = doc.load_page(page_num)
+            page_height = page.rect.height
+            blocks = page.get_text("blocks")  # Extract text blocks with positions
+            cleaned_lines = []
 
-    for page_num in range(doc.page_count):
-        page = doc.load_page(page_num)
-        page_height = page.rect.height
-        blocks = page.get_text("blocks")  # Extract text blocks with positions
-        cleaned_lines = []
+            for block in blocks:
+                block_text = block[4]  # Text content of the block
+                block_y0 = block[1]    # Y-coordinate (top) of the block
+                block_y1 = block[3]    # Y-coordinate (bottom) of the block
 
-        for block in blocks:
-            block_text = block[4]  # Text content of the block
-            block_y0 = block[1]    # Y-coordinate (top) of the block
-            block_y1 = block[3]    # Y-coordinate (bottom) of the block
+                # Adjust the footer skip logic
+                # Including a more flexible range to cover various types of content
+                if block_y1 > page_height * 0.9:
+                    continue
 
-            # Adjust the footer skip logic
-            # Including a more flexible range to cover various types of content
-            if block_y1 > page_height * 0.9:
-                continue
+                # Clean text and add to the lines
+                cleaned_lines.append(clean_text(block_text))
 
-            # Clean text and add to the lines
-            cleaned_lines.append(clean_text(block_text))
+            # Combine cleaned lines for the page
+            page_text = "\n".join(cleaned_lines)
+            extracted_text.append(page_text)
 
-        # Combine cleaned lines for the page
-        page_text = "\n".join(cleaned_lines)
-        extracted_text.append(page_text)
+        doc.close()
+        return "\n".join(extracted_text)
+    else:
+        for page_num in page_number:
+            page = doc.load_page(page_num)
+            page_height = page.rect.height
+            blocks = page.get_text("blocks")  # Extract text blocks with positions
+            cleaned_lines = []
 
-    doc.close()
-    return "\n".join(extracted_text)
+            for block in blocks:
+                block_text = block[4]  # Text content of the block
+                block_y0 = block[1]    # Y-coordinate (top) of the block
+                block_y1 = block[3]    # Y-coordinate (bottom) of the block
+
+                # Adjust the footer skip logic
+                # Including a more flexible range to cover various types of content
+                if block_y1 > page_height * 0.9:
+                    continue
+
+                # Clean text and add to the lines
+                cleaned_lines.append(clean_text(block_text))
+
+            # Combine cleaned lines for the page
+            page_text = "\n".join(cleaned_lines)
+            extracted_text.append(page_text)
+
+        doc.close()
+        return "\n".join(extracted_text)
 
 def extract_text_from_word(docx_file):
     doc = Document(docx_file)
     raw_text = '\n'.join([para.text for para in doc.paragraphs])
     return raw_text
                     
-
 def process_text_with_gemini(text, reference_content):
     prompt = f"""You must refer strictly to the reference template provided below and perform the following tasks:
 
 1. **Contraindications**:
     Provide **Contraindications** of related that Product/Device only...
-    If Contraindications is not there so give some LLM generate response related to that device refer template :
+    If **Contraindications** are not found in the content, then write  "LLM generated response check manually" :
     
 2. **Device Description**:
     If you genearting description of own write an manaual
@@ -221,57 +254,101 @@ def process_text_with_gemini(text, reference_content):
 Reference Template:\n{reference_content}\n
 Content to Process:\n{text}
 """
-    
-
-    input_token_count = estimate_token_count(prompt)
-    
-    # Measure time for response generation
-    start_time = time.time()
 
     # Send the prompt to the Gemini model
     response = model.generate_content(prompt)
     
-    # Calculate response time and token count
-    response_time = time.time() - start_time
-    response_text = response.text if response else None
-    output_token_count = estimate_token_count(response_text) if response_text else 0
-    response_token_count = input_token_count + output_token_count
-    
-    # Return the response, token counts, and time
-    return response_text, input_token_count, output_token_count, response_token_count, response_time
-    # Send the prompt to the Gemini model
-def save_generated_response(response_text, input_token_count, output_token_count, response_token_count, response_time, file_name="Generated_Response.docx"):
-    doc = Document()
+    return response.text if response else None
 
-    # Add the generated response
-    doc.add_paragraph(response_text)
 
-    # Add token counts and response time at the end of the document
-    doc.add_paragraph("\n\n")
-    doc.add_paragraph(f"Input Token Count: {input_token_count}")
-    doc.add_paragraph(f"Output Token Count: {output_token_count}")
-    doc.add_paragraph(f"Response Token Count: {response_token_count}")
-    doc.add_paragraph(f"Response Generation Time: {response_time:.2f} seconds")
-    
-    doc.save(file_name)
-    st.success(f"Generated response saved as {file_name}")
 
-    # Provide a link to download the Word document
-    with open(file_name, "rb") as file:
-        doc_data = file.read()
-    st.markdown(generate_word_download_link(doc_data, file_name.split('.')[0]), unsafe_allow_html=True)
+
+image_name=[]
+def extract_image_page_number(image_labels,reference_content):
+    prompt = f""" this is image name list {image_labels} and this is output template:{reference_content}
+             your task is to find the image name from list whose mention in output template in image section and returm only and only figure name
+
+"""
+        
+    # Generate the rewritten text using the correct method
+    return model.generate_content([prompt]).text
+
+def extract_image_titles_from_page(page,page_number):
+    titles = []
+    text = page.get_text("text")
+    for line in text.split('\n'):
+        match = re.match(r"Figure \d+\. .+", line)
+        if match:
+            titles.append(f"{match.group(0)}_{page_number}")
+    return titles
+
+def extract_images_from_pdf(pdf_path, output_folder):
+    # Open the PDF file
+    pdf_document = fitz.open(pdf_path)
+    image_count = 0
+
+    # Create the output directory if it does not exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    for page_number in range(len(pdf_document)):
+        page = pdf_document.load_page(page_number)
+        image_list = page.get_images(full=True)
+        titles = extract_image_titles_from_page(page,page_number)
+        
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = pdf_document.extract_image(xref)
+            image_bytes = base_image["image"]
+            image = Image.open(io.BytesIO(image_bytes))
+            
+            # Convert CMYK to RGB if needed
+            if image.mode == "CMYK":
+                image = image.convert("RGB")
+            
+            # Use the title or a default name if title is not available
+            title = f"{titles[img_index]}" if img_index < len(titles) else f"Figure_{page_number + 1}_{img_index + 1}"
+            image_name.append(title)
+            title = title.replace(':', '')  # Remove invalid characters for filenames
+            image_filename = os.path.join(output_folder, f"{title}.png")
+            image.save(image_filename)
+            image_count += 1
+
+    return image_name,titles
+
+def final_image_output_gemini(text,reference_content):
+    prompt = f""" this is contex {text} and this is output template:{reference_content}
+             your task is to find the details about mantion topic in template 
+        Instructions:\n"
+                "1. **Context Specific**: Start by extracting all relevant text  "
+                "that mentions 'Control Panel'. Continue with the next pages until no further relevant content is found.\n\n"
+                "2. **Maintain Order**: Keep the extracted content in the same order as it appears in the document.\n\n"
+                "3. **Include All Descriptions**: If there are any titles, bullet points, or paragraphs "
+                "directly related to 'Control Panel', include them fully without omitting any details.\n\n"
+                "Extracted Content:\n"
+                "4. Output should be in word document format"
+
+"""
+        
+    # Generate the rewritten text using the correct method
+    return model.generate_content([prompt]).text  # Use the correct method name here
+
 
 
 
 # Function to generate a Word document
-def save_text_in_document(text):
+def save_text_in_document(text,image=None):
+    print(text)
     output = io.BytesIO()
     doc = Document()
+    
+    if image!= None:
+        doc.add_heading(image, level=2)
+        doc.add_picture(f"ExtractedImages2\{image}.png",width=Inches(6.0))
     doc.add_paragraph(text)
     doc.save(output)
     output.seek(0)  # Reset the buffer position to the beginning
     return output
-
 
 def generate_word_download_link(doc_data, filename):
     b64 = base64.b64encode(doc_data).decode()
@@ -330,45 +407,59 @@ if st.session_state.selected_feature == 'generator':
     
     
     if st.session_state.option == 'text': 
-     st.write("") 
-    st.markdown("**Text Extraction**")
-    input_file_text = st.file_uploader(
-        "🔽 Upload Document for Text Extraction ",
-        accept_multiple_files=True,
-        type=['pdf', 'docx']
-    )
-    
-    if input_file_text:
-        st.success(f"{len(input_file_text)} file(s) uploaded successfully!")
+        st.write("") 
+        st.markdown("**Text Extraction**")
+        input_file_text = st.file_uploader(
+            "🔽 Upload Document for Text Extraction ",
+            accept_multiple_files=True,
+            type=['pdf', 'docx']
+        )
         
-    st.write("")
-    st.write("")
-    
-    output_file_text = st.file_uploader(
-        "🔽 Upload Output File Template for Text Extraction ",
-        type=['docx', 'pdf']
-    )
-    
-    st.write("")
-    st.write("")
-    
-    if st.button("Submit"):
-        for document in input_file_text:
-            extract_text = extract_pdf_text(document)
-        reference_content = extract_text_from_word(output_file_text)
+        if input_file_text:
+            st.success(f"{len(input_file_text)} file(s) uploaded successfully!")
+            
+        st.write("")
+        st.write("")
+        
 
-        if extract_text and reference_content:
-            # Process the extracted text with Gemini for generating response
-            generated_response, input_token_count, output_token_count, response_token_count, response_time = process_text_with_gemini(extract_text, reference_content)
+        # Now show the Output File Uploader
+        output_file_text = st.file_uploader(
+            "🔽 Upload Output File Template for Text Extraction ",
+            type=['docx', 'pdf']
+        )
+        
+        st.write("")
+        st.write("")
+        
+        
+        
+        if st.button("Submit"):
+            for document in input_file_text:
+                
 
-            if generated_response:
-                # Save the response along with token counts and time
-                save_generated_response(generated_response, input_token_count, output_token_count, response_token_count, response_time, file_name=os.path.splitext(document.name)[0])
-            else:
-                st.error("Failed to generate a response using Gemini.")
-        else:
-            st.error("No text extracted from one or both documents.")
+                extract_text=extract_pdf_text(document)
+                reference_content = extract_text_from_word(output_file_text)
 
+                if extract_text and reference_content:
+                     # Process the extracted text with Gemini for generating response
+                    generated_response = process_text_with_gemini(extract_text, reference_content)
+                
+                    if generated_response:
+                       text=save_text_in_document(generated_response)
+                       
+                    else:
+                        st.error("Failed to generate a response using Gemini.")
+                else:
+                    st.error("No text extracted from one or both documents.")
+
+
+                
+
+                file_name = os.path.splitext(document.name)[0]
+                st.markdown(generate_word_download_link(text.getvalue(),file_name), unsafe_allow_html=True)
+
+                # st.markdown(generate_excel_download_link(tables,file_name), unsafe_allow_html=True)
+                
 
 
 
@@ -403,20 +494,31 @@ if st.session_state.selected_feature == 'generator':
         if st.button("Submit"):
             for document in input_file_image:
                 #extract table
-                substring = "Technical Data Sheet"
-                extract_tables = extract_and_format_tables(document.name)
-                filter_table_with_column = filter_tables_with_column(extract_tables,substring)
-                st.write(filter_table_with_column)
+                
 
-                tables=save_tables_to_excel(extract_tables)
+                
+                reference_content = extract_text_from_word(output_file_image)
 
-                #extract text
-                extract_text=extract_texts_from_file(document.name)
-                text=save_text_in_document(extract_text)
+                image_labels,title =extract_images_from_pdf(document.name,"ExtractedImages2")
+
+                generated_response=extract_image_page_number(image_labels,reference_content)
+                image = generated_response.replace("-", "")
+                image=image.strip()
+                
+                number = int(image.split('_')[-1])
+                
+                page_num=[number-1,number,number+1,number+2]
+                
+                extract_text=extract_pdf_text(document.name,page_num)
+                final_text=final_image_output_gemini(extract_text,reference_content)
+                
+                text=save_text_in_document(final_text,image)
 
                 file_name = os.path.splitext(document.name)[0]
 
-                st.markdown(generate_excel_download_link(tables,file_name), unsafe_allow_html=True)
+                
+
+                
                 st.markdown(generate_word_download_link(text.getvalue(),file_name), unsafe_allow_html=True)
 
 
@@ -453,20 +555,17 @@ if st.session_state.selected_feature == 'generator':
                 #extract table
                 substring = "Technical Data Sheet"
                 extract_tables = extract_and_format_tables(document.name)
-                filter_table_with_column = filter_tables_with_column(extract_tables,substring)
-                st.write(filter_table_with_column)
+                
 
                 tables=save_tables_to_excel(extract_tables)
 
                 #extract text
-                extract_text=extract_texts_from_file(document.name)
-                text=save_text_in_document(extract_text)
+                
 
                 file_name = os.path.splitext(document.name)[0]
 
                 st.markdown(generate_excel_download_link(tables,file_name), unsafe_allow_html=True)
-                st.markdown(generate_word_download_link(text.getvalue(),file_name), unsafe_allow_html=True)
-
+                
 
 
 
@@ -489,6 +588,8 @@ if st.session_state.selected_feature == 'summarization':
     
     if output_file2:
         st.success(f"Output file '{output_file2.name}' uploaded successfully!")
+
+
 
 
 if st.session_state.selected_feature == 'scraping':
